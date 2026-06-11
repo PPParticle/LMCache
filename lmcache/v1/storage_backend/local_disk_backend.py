@@ -444,7 +444,7 @@ class LocalDiskBackend(StorageBackendInterface):
             # busy_loop=False prevents spinning on the event loop thread;
             # if staging memory is exhausted the caller will get a logged
             # error rather than a silent deadlock.
-            memory_obj = self.local_cpu_backend.allocate(
+            memory_obj = self.local_cpu_backend.allocate_staging(
                 shape,
                 dtype,
                 fmt,
@@ -588,8 +588,14 @@ class LocalDiskBackend(StorageBackendInterface):
         Load bytearray from disk.
         """
 
-        memory_obj = self.local_cpu_backend.allocate(shape, dtype, fmt)
-        assert memory_obj is not None, "Memory allocation failed during disk load."
+        memory_obj = self.local_cpu_backend.allocate_staging(shape, dtype, fmt)
+        if memory_obj is None:
+            logger.error(
+                "Staging allocation failed for disk load of %s. "
+                "CPU staging pool may be exhausted.",
+                key,
+            )
+            return None
 
         buffer = memory_obj.byte_array
         self.read_file(key, buffer, path)

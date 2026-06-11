@@ -72,6 +72,24 @@ class LocalCPUBackend(AllocatorBackendInterface):
         self.instance_id = config.lmcache_instance_id
         self.cpu_lock = threading.Lock()
 
+        # Staging allocator: separate memory pool for SSD read staging
+        staging_size_gb = getattr(config, 'staging_cpu_size', 0.0)
+        if staging_size_gb > 0:
+            staging_size_bytes = int(staging_size_gb * 1024**3)
+            numa_mapping = NUMADetector.get_numa_mapping(config)
+            self.staging_allocator = MixedMemoryAllocator(
+                staging_size_bytes,
+                numa_mapping=numa_mapping,
+                config=config,
+            )
+            logger.info(
+                f"Staging allocator created: {staging_size_gb:.2f} GB "
+                f"for SSD read staging"
+            )
+        else:
+            self.staging_allocator = None
+
+
         self.stats_monitor = LMCStatsMonitor.GetOrCreate()
 
         self.layerwise = config.use_layerwise
@@ -370,7 +388,23 @@ class LocalCPUBackend(AllocatorBackendInterface):
 
         # Calculate effective CPU memory size
         cpu_size = self._calculate_effective_cpu_size(cpu_size, config, metadata)
-        cpu_size_bytes = int(cpu_size * 1024**3)
+
+        # Subtract staging size from hot_cache if configured
+        staging_size_gb = getattr(config, 'staging_cpu_size', 0.0)
+        staging_size_bytes = 0
+        if staging_size_gb > 0:
+            staging_size_bytes = int(staging_size_gb * 1024**3)
+            logger.info(
+                f"Reserving {staging_size_gb:.2f} GB for SSD staging buffer, "
+                f"hot_cache reduced from {cpu_size:.2f} GB "
+                f"to {cpu_size - staging_size_gb:.2f} GB"
+            )
+
+        cpu_size_bytes = int(cpu_size * 1024**3) - staging_size_bytes
+        assert cpu_size_bytes > 0, (
+            f"Hot cache size must be > 0 after staging reservation. "
+            f"cpu_size={cpu_size:.2f}GB, staging={staging_size_gb:.2f}GB"
+        )
 
         allocator_align_bytes = self._resolve_local_cpu_allocator_alignment(config)
         if allocator_align_bytes is not None:
@@ -587,6 +621,40 @@ class LocalCPUBackend(AllocatorBackendInterface):
 
         self.stats_monitor.update_local_cpu_evict_metrics(evict_keys_count)
         return memory_obj
+
+    def allocate_staging(
+        self,
+        shapes: Union[torch.Size, list[torch.Size]],
+        dtypes: Union[torch.dtype, list[torch.dtype]],
+        fmt: Optional[MemoryFormat] = None,
+        busy_loop: bool = False,
+    ) -> Optional[MemoryObj]:
+        """Allocate from staging pool (for SSD read staging).
+
+        Uses the separate staging allocator when configured, otherwise
+        falls back to the main allocator with busy_loop=False to avoid
+        deadlocking the event loop thread.
+        """
+        if self.staging_allocator is None:
+            return self.allocate(shapes, dtypes, fmt, busy_loop=False)
+
+        if fmt is None:
+            if self.layerwise:
+                if self.enable_blending:
+                    fmt = MemoryFormat.KV_2TD
+                else:
+                    fmt = MemoryFormat.KV_T2D
+            else:
+                fmt = MemoryFormat.KV_2LTD
+
+        return self.staging_allocator.allocate(shapes, dtypes, fmt)
+
+    def free_staging(self, memory_obj: MemoryObj) -> None:
+        """Free staging memory back to the staging pool."""
+        if self.staging_allocator is not None:
+            self.staging_allocator.free(memory_obj)
+        else:
+            self.free(memory_obj)
 
     @_lmcache_nvtx_annotate
     def batched_allocate(
