@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
+import os
 from concurrent.futures import Future
 from typing import TYPE_CHECKING, Any, Callable, List, Optional, Sequence, Union
 import threading
@@ -596,6 +597,14 @@ class LocalCPUBackend(AllocatorBackendInterface):
                     logger.debug(
                         "Not busy looping because we are not immediately able to evict"
                     )
+                    # [Approach-A] Store staging fallback: when hot pool is full and
+                    # can't evict, try the staging pool as overflow (env-gated).
+                    if (self.staging_allocator is not None
+                            and os.environ.get("LMCACHE_STORE_STAGING_FALLBACK") == "1"):
+                        sobj = self.staging_allocator.allocate(shapes, dtypes, fmt)
+                        if sobj is not None:
+                            logger.info("[STORE-STAGING] store fell back to staging pool")
+                            return sobj
                     break
 
                 # TODO: make time_to_wait a config
@@ -605,13 +614,34 @@ class LocalCPUBackend(AllocatorBackendInterface):
                     "Local cpu memory is under pressure. "
                     f"Waiting for {time_to_wait} seconds before retrying."
                 )
-                # self.memory_allocator.memcheck()
-                # do not hold the lock during sleep
-                time.sleep(time_to_wait)
+                # [Approach-A] Before sleeping, try staging pool to avoid busy_loop stall.
+                # When hot is full + all entries pinned + busy_loop=True:
+                #   staging has room → allocate from staging, return immediately (no sleep).
+                #   staging also full → skip sleep, immediately retry hot (eviction may succeed
+                #   on next attempt as other threads unpin entries).
+                if (self.staging_allocator is not None
+                        and os.environ.get("LMCACHE_STORE_STAGING_FALLBACK") == "1"):
+                    sobj = self.staging_allocator.allocate(shapes, dtypes, fmt)
+                    if sobj is not None:
+                        logger.info("[STORE-STAGING] store used staging before busy_loop sleep")
+                        return sobj
+                    # staging full → don't sleep, fall through to hot retry immediately
+                else:
+                    # self.memory_allocator.memcheck()
+                    # do not hold the lock during sleep
+                    time.sleep(time_to_wait)
 
             memory_obj = self.memory_allocator.allocate(shapes, dtypes, fmt)
             if memory_obj is not None:
                 break
+
+            # [Approach-A] Hot retry failed → try staging pool as overflow
+            if (self.staging_allocator is not None
+                    and os.environ.get("LMCACHE_STORE_STAGING_FALLBACK") == "1"):
+                sobj = self.staging_allocator.allocate(shapes, dtypes, fmt)
+                if sobj is not None:
+                    logger.info("[STORE-STAGING] store fell back to staging pool")
+                    return sobj
 
             num_attempts += 1
             logger.debug(
@@ -754,6 +784,14 @@ class LocalCPUBackend(AllocatorBackendInterface):
                     logger.debug(
                         "Not busy looping because we are not immediately able to evict"
                     )
+                    # [Approach-A] Store staging fallback: when hot pool is full and
+                    # can't evict, try the staging pool as overflow (env-gated).
+                    if (self.staging_allocator is not None
+                            and os.environ.get("LMCACHE_STORE_STAGING_FALLBACK") == "1"):
+                        sobj = self.staging_allocator.allocate(shapes, dtypes, fmt)
+                        if sobj is not None:
+                            logger.info("[STORE-STAGING] store fell back to staging pool")
+                            return sobj
                     break
 
                 # TODO: make time_to_wait a config
@@ -763,15 +801,38 @@ class LocalCPUBackend(AllocatorBackendInterface):
                     "Local cpu memory is under pressure. "
                     f"Waiting for {time_to_wait} seconds before retrying."
                 )
-                # self.memory_allocator.memcheck()
-                # do not hold the lock during sleep
-                time.sleep(time_to_wait)
+                # [Approach-A] Before sleeping, try staging pool to avoid busy_loop stall.
+                # When hot is full + all entries pinned + busy_loop=True:
+                #   staging has room → allocate from staging, return immediately (no sleep).
+                #   staging also full → skip sleep, immediately retry hot (eviction may succeed
+                #   on next attempt as other threads unpin entries).
+                if (self.staging_allocator is not None
+                        and os.environ.get("LMCACHE_STORE_STAGING_FALLBACK") == "1"):
+                    sobj = self.staging_allocator.allocate(shapes, dtypes, fmt)
+                    if sobj is not None:
+                        logger.info("[STORE-STAGING] store used staging before busy_loop sleep")
+                        return sobj
+                    # staging full → don't sleep, fall through to hot retry immediately
+                else:
+                    # self.memory_allocator.memcheck()
+                    # do not hold the lock during sleep
+                    time.sleep(time_to_wait)
 
             memory_objs = self.memory_allocator.batched_allocate(
                 shapes, dtypes, batch_size, fmt
             )
             if memory_objs:
                 break
+
+            # [Approach-A] Hot retry failed → try staging pool as overflow
+            if (self.staging_allocator is not None
+                    and os.environ.get("LMCACHE_STORE_STAGING_FALLBACK") == "1"):
+                sobjs = self.staging_allocator.batched_allocate(
+                    shapes, dtypes, batch_size, fmt
+                )
+                if sobjs:
+                    logger.info("[STORE-STAGING] batched store fell back to staging pool")
+                    return sobjs
 
             num_attempts += 1
             logger.debug(

@@ -413,6 +413,23 @@ def _allocate_cpu_memory(
     if size == 0:
         return torch.empty(0, dtype=torch.uint8)
 
+    # [Approach-B] Pageable allocation: use regular malloc instead of pinned
+    # when env flag is set. NPU driver handles pageable->pinned internally.
+    # [Approach-C] Optionally mlock the pageable buffer to restore DMA speed.
+    if os.environ.get("LMCACHE_PAGEABLE_CPU") == "1":
+        import logging
+        buffer = torch.empty(size, dtype=torch.uint8)
+        if os.environ.get("LMCACHE_MLOCK_BUFFER") == "1":
+            libc = ctypes.CDLL("libc.so.6")
+            ptr = buffer.data_ptr()
+            ret = libc.mlock(ctypes.c_void_p(ptr), ctypes.c_size_t(size))
+            logging.getLogger("lmcache").info(
+                f"[PAGEABLE+MLOCK] {size / 1e9:.2f} GB pageable + mlock={ret}")
+        else:
+            logging.getLogger("lmcache").info(
+                f"[PAGEABLE] {size / 1e9:.2f} GB pageable (non-pinned)")
+        return buffer
+
     alloc_info, _ = _resolve_pinned_alloc_free(
         numa_mapping,
         shm_name,

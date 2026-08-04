@@ -400,10 +400,25 @@ class VLLMPagedMemGPUConnectorV2(GPUConnectorInterface):
 
     # TODO(Jiayi): need to optimize to enable real batching
     def batched_to_gpu(self, memory_objs, starts, ends, **kwargs):
-        with torch.cuda.stream(self.load_stream):
-            for memory_obj, start, end in zip(memory_objs, starts, ends, strict=False):
+        # [OPTIMIZATION] Multi-stream copy-compute pipeline overlap.
+        # NPU 910B has 1 DMA engine (H2D copies serialize), but `to_gpu`
+        # = H2D copy + scatter(compute). Multi-stream overlaps scatter of
+        # chunk N with H2D copy of chunk N+1 — classic copy-compute pipeline.
+        # Combined with async event sync (LayerKV ASPLOS'25 inspired):
+        # CPU never blocks; compute stream waits on GPU-side events.
+        num_dma_streams = 4
+        if not hasattr(self, '_dma_streams'):
+            self._dma_streams = [torch.cuda.Stream()
+                                 for _ in range(num_dma_streams)]
+        streams = self._dma_streams
+        for i, (memory_obj, start, end) in enumerate(zip(memory_objs, starts, ends, strict=False)):
+            sid = i % num_dma_streams
+            with torch.cuda.stream(streams[sid]):
                 self.to_gpu(memory_obj, start, end, **kwargs)
-        self.load_stream.synchronize()
+        self._load_event = torch.cuda.Event()
+        for s in streams:
+            torch.cuda.current_stream().wait_stream(s)
+        self._load_event.record()
 
     # TODO(Jiayi): need to optimize to enable real batching
     def batched_from_gpu(self, memory_objs, starts, ends, **kwargs):

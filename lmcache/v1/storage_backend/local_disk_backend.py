@@ -451,6 +451,7 @@ class LocalDiskBackend(StorageBackendInterface):
                 busy_loop=False,
             )
 
+
             if memory_obj is None:
                 logger.error(
                     "Memory allocation failed during async disk load for key %s. "
@@ -557,19 +558,34 @@ class LocalDiskBackend(StorageBackendInterface):
     ) -> list[MemoryObj]:
         """
         Async load bytearray from disk.
+        [OPTIMIZATION] Concurrent SSD reads via thread pool.
+        Modern NVMe SSDs support multiple hardware queues; Python GIL
+        is released during I/O syscalls, so threads truly parallelize.
         """
 
         logger.debug("Executing `async_load_bytes` from disk.")
-        # TODO (Jiayi): handle the case where loading fails.
-        for path, key, mem_obj in zip(paths, keys, memory_objs, strict=False):
+
+        def _read_one(item):
+            path, key, mem_obj = item
             buffer = mem_obj.byte_array
             self.read_file(key, buffer, path)
-
-            # TODO(Jiayi): Please recover the metadata in a more
-            # elegant way in the future.
             cached_positions = self.dict[key].cached_positions
             mem_obj.metadata.cached_positions = cached_positions
+            return mem_obj
 
+        from concurrent.futures import ThreadPoolExecutor
+        items = list(zip(paths, keys, memory_objs, strict=False))
+        # Use up to 8 concurrent readers for NVMe parallelism
+        num_workers = min(8, len(items))
+        if num_workers > 1:
+            with ThreadPoolExecutor(max_workers=num_workers) as pool:
+                results = list(pool.map(_read_one, items))
+            memory_objs = results
+        else:
+            for item in items:
+                _read_one(item)
+
+        for key in keys:
             self.disk_lock.acquire()
             self.dict[key].unpin()
             self.disk_lock.release()

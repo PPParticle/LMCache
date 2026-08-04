@@ -273,9 +273,13 @@ class GPUKVFormat(IntEnum):
     NL_X_NB_TWO_NH_BS_HS = 7
 
 
-# On XPU (Intel GPU), PyTorch 2.4+ supports pin_memory=True via SYCL USM
-# host allocation, enabling fast DMA for XPU<->CPU transfers.
+# Whether the active non-CUDA accelerator supports fast async DMA from
+# page-locked (pinned) host memory, so non_blocking H2D/D2H copies can overlap.
+#   - XPU (Intel GPU): PyTorch 2.4+ via SYCL USM host allocation.
+#   - NPU (Ascend, torch_npu): torch pin_memory enables async NPU<->CPU DMA.
 _XPU_PIN_MEMORY = hasattr(torch, "xpu") and torch.xpu.is_available()
+_NPU_PIN_MEMORY = hasattr(torch, "npu") and torch.npu.is_available()
+_PIN_MEMORY = _XPU_PIN_MEMORY or _NPU_PIN_MEMORY
 
 
 def alloc_pinned_numa_ptr(size: int, numa_id: int = 0) -> int:
@@ -284,7 +288,7 @@ def alloc_pinned_numa_ptr(size: int, numa_id: int = 0) -> int:
     Note: NUMA node selection is not supported on non-CUDA."""
 
     # Create a 1D uint8 CPU tensor, as uint8 == 1 byte
-    tensor = torch.empty(size, dtype=torch.uint8, pin_memory=_XPU_PIN_MEMORY)
+    tensor = torch.empty(size, dtype=torch.uint8, pin_memory=_PIN_MEMORY)
 
     # First-touch initialization (forces physical allocation)
     tensor.fill_(0)
@@ -312,7 +316,7 @@ def alloc_pinned_ptr(size: int, device_id: int = 0) -> int:
     fast DMA transfers. On other non-CUDA platforms, pinning is not supported."""
 
     # Create a 1D uint8 CPU tensor, as uint8 == 1 byte
-    tensor = torch.empty(size, dtype=torch.uint8, pin_memory=_XPU_PIN_MEMORY)
+    tensor = torch.empty(size, dtype=torch.uint8, pin_memory=_PIN_MEMORY)
 
     # First-touch initialization (forces physical allocation)
     tensor.fill_(0)

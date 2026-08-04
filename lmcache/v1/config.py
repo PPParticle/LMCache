@@ -70,6 +70,7 @@ _CONFIG_DEFINITIONS: dict[str, dict[str, Any]] = {
     "max_local_cpu_size": {"type": float, "default": 5.0, "env_converter": float},
     "reserve_local_cpu_size": {"type": float, "default": 0.0, "env_converter": float},
     "staging_cpu_size": {"type": float, "default": 0.0, "env_converter": float},
+    "disk_bypass_hot_writeback": {"type": bool, "default": False, "env_converter": _to_bool},
     "local_disk": {
         "type": Optional[str],
         "default": None,

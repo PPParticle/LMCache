@@ -1651,12 +1651,19 @@ class LMCacheEngine:
             block_mapping = self.storage_manager.get_block_mapping(chunk_infos)
 
         last_failed_block_start = None
+        seen_ptrs = {}  # [DIAG] data_ptr -> key, detect allocator buffer reuse
+        import time as _pt
+        _pt_get_total = 0
         for location, blocks in block_mapping.items():
             keys = [key for key, _, _ in blocks]
+            _pt_g0 = _pt.time()
             memory_objs = self.storage_manager.batched_get(
                 keys=keys,
                 location=location,
             )
+            _pt_get_total += _pt.time() - _pt_g0
+            logger.info("[PROFILE] batched_get location=%s keys=%d took %.3fs (cumul %.3fs)",
+                        str(location)[:30], len(keys), _pt.time()-_pt_g0, _pt_get_total)
 
             used_keys: set[CacheEngineKey] = set()
             for (key, start, end), memory_obj in zip(blocks, memory_objs, strict=False):
@@ -1673,6 +1680,17 @@ class LMCacheEngine:
                         last_failed_block_start = start
                     break
                 reordered_chunks.append((key, memory_obj, start, end))
+                # [DIAG] detect allocator handing the same buffer to two chunks
+                try:
+                    _ptr = memory_obj.data_ptr()
+                except Exception:
+                    _ptr = None
+                if _ptr is not None:
+                    if _ptr in seen_ptrs and seen_ptrs[_ptr] != str(key):
+                        logger.warning(
+                            "[DIAG REUSE-BUG] data_ptr=%s reused by key=%s AND key=%s",
+                            _ptr, seen_ptrs[_ptr], str(key))
+                    seen_ptrs[_ptr] = str(key)
                 tot_kv_size += memory_obj.get_size()
                 ret_mask[start:end] = True
                 used_keys.add(key)
